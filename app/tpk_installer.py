@@ -28,7 +28,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # 改动版本时必须与 config.json 的 version 同步（前缀 v 不算），
 # `tie-niu-led/appstore/_build_appinstall.py` 打包时会断言两者一致。
 # 展示用的版本串（含 v 前缀，与风扇调速等同风格）。
-VERSION = "v1.1.3"
+VERSION = "v1.1.5"
 
 # ---------- 可通过环境变量覆盖的部署参数（默认值 = 铁牛 NAS 的路径） ----------
 PORT = int(os.environ.get("TPK_PORT") or 8978)
@@ -55,6 +55,17 @@ DEFAULT_LOC = os.environ.get("TPK_DEFAULT_LOC") or "/volume1"
 # 本机基础镜像 python:3.12-slim-bookworm 实测 124,351,708 B；与应用中心其它应用共用同一镜像。
 # 需要时可用环境变量 TPK_IMAGE_SIZE_KB 覆盖。
 IMAGE_SIZE_KB = int(os.environ.get("TPK_IMAGE_SIZE_KB") or 121437)
+
+# ---------- 常驻"拉包端口" ----------
+# 应用中心装应用 = 下载 download_url 指向的那个 .tpk。appinstall 自己那一份包
+# 只能由 appinstall 自己提供（download_url = http://127.0.0.1:8978/files/...），
+# 所以容器一被删（手动 docker rm、卸载、安装中途失败），8978 立刻无人应答，
+# 应用中心就再也装不回它 —— 只能上机手工救。
+# 装的时候会在宿主机上常驻同一个程序、只换下面这个端口，让拉包链路永远有应答。
+FALLBACK_PORT = int(os.environ.get("TPK_FALLBACK_PORT") or 8799)
+# 安装脚本（在宿主机上以 root 跑）抄来的 uid 清单：桌面图标要落到每个 NAS 用户头上，
+# 而容器里看不到宿主机的 /etc/passwd。
+USER_IDS_FILE = os.path.join(STORE, ".users")
 
 os.makedirs(ICONS, exist_ok=True)
 
@@ -352,6 +363,60 @@ def app_state(code):
     return app_states().get(code)
 
 
+def _port_alive(port, timeout=3):
+    """回环探测某端口上是不是这个程序（/favicon.ico 是公开的，不用登录）。"""
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:%d/favicon.ico" % port, timeout=timeout) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+def dl_port():
+    """安装包下载地址该用哪个端口：优先常驻端口（容器没了也叫得应），否则退回自己。"""
+    if FALLBACK_PORT != PORT and _port_alive(FALLBACK_PORT):
+        return FALLBACK_PORT
+    return PORT
+
+
+def known_user_ids():
+    """NAS 上的用户 uid：安装脚本抄来的清单 + 库里已有记录，都没有才兜底 1000。"""
+    ids = set()
+    try:
+        with open(USER_IDS_FILE) as f:
+            for tok in re.split(r"[\s,]+", f.read()):
+                if tok.strip().isdigit():
+                    ids.add(int(tok))
+    except Exception:
+        pass
+    try:
+        for r in db_query("SELECT DISTINCT user_id FROM appstore_app_shortcut"):
+            ids.add(int(r["user_id"]))
+    except Exception:
+        pass
+    return sorted(ids) or [1000]
+
+
+def ensure_shortcut(code):
+    """补一行桌面快捷方式 (user_id, app_code, operate_type=1)。
+
+    官方那条路是前端调 /appstoreApi/appShortcut/operate 写的，接口要登录令牌
+    （回环无令牌会被拒：'Failed to authorize user. Err: Token is missing'），
+    所以没登录、没 root 的人装完永远没有桌面图标。这里直接落库补上。
+    已有记录一律不动 —— 用户自己在桌面上删掉的会留下 operate_type=0，不能被顶回来。
+    """
+    n = 0
+    for uid in known_user_ids():
+        try:
+            db_exec("INSERT OR IGNORE INTO appstore_app_shortcut"
+                    " (user_id, app_code, operate_type, create_time, update_time)"
+                    " VALUES (?,?,1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)", (uid, code))
+            n += 1
+        except Exception:
+            pass
+    return n
+
+
 def install_registered(code, loc, meta):
     """把已注册的应用交给应用中心安装（若已装则先卸旧再装新）。
     返回 (ok, message)。"""
@@ -442,6 +507,29 @@ def selftest():
             "已启用；口令来自 %s" % ("环境变量 TPK_PASSWORD"
                                      if (AUTH or {}).get("source") == "env"
                                      else "页面设置（记录在 %s）" % AUTH_FILE))
+
+    p = dl_port()
+    if p != PORT:
+        add("安装包拉取端口", True, "127.0.0.1:%d（常驻服务，容器被删也装得回来）" % p)
+    else:
+        add("安装包拉取端口", FALLBACK_PORT == PORT,
+            "127.0.0.1:%d —— 未发现常驻拉包服务，容器被删后应用中心会拉不到包" % p)
+
+    try:
+        uids = known_user_ids()
+        miss = []
+        for r in db_query("SELECT code FROM appstore_app WHERE download_url LIKE ?",
+                          ("%/files/%%.tpk",)):
+            if not db_query("SELECT operate_type FROM appstore_app_shortcut"
+                            " WHERE user_id=? AND app_code=?", (uids[0], r["code"])):
+                miss.append(r["code"])
+        if miss:
+            add("桌面快捷方式", False,
+                "以下应用还没有桌面图标: %s（重启应用会自动补齐）" % ", ".join(miss))
+        else:
+            add("桌面快捷方式", True, "用户 %s 均已就位" % ", ".join(str(i) for i in uids))
+    except Exception as exc:
+        add("桌面快捷方式", False, str(exc))
 
     return {
         "items": items,
@@ -553,7 +641,7 @@ def register_tpk(path, host_hdr):
     host = (host_hdr or "").strip()
     if not host or host.split(":")[0] in ("127.0.0.1", "localhost", "0.0.0.0"):
         host = "%s:%d" % (_lan_ip(), PORT)  # 浏览器要能访问, 回环地址一律换网卡 IP
-    dl_url = "http://127.0.0.1:%d/files/%s.tpk" % (PORT, code)
+    dl_url = "http://127.0.0.1:%d/files/%s.tpk" % (dl_port(), code)
     lan_icon_url = "http://%s/icons/%s.png" % (host, code)
     # 手机App / 远程网页只有公网地址能加载；发布失败才退回局域网地址
     icon_url = public_icon or lan_icon_url
@@ -592,6 +680,7 @@ def register_tpk(path, host_hdr):
         db_exec("INSERT OR IGNORE INTO appstore_app_tag_relate(code, tag_code) VALUES (?, 'utilities')", (code,))
     except Exception:
         pass
+    ensure_shortcut(code)          # 装完就得有桌面图标，不等前端来点
     return code, {"name": (cfg.get("i18n") or [{}])[0].get("name", code), "version": version, "size": size}
 
 
@@ -1183,12 +1272,53 @@ class Handler(BaseHTTPRequestHandler):
                 pass
 
 
+def selfheal():
+    """启动自愈（每次开机/重启跑一遍）：
+
+    1) 应用中心里没有自己的记录 -> 用包库里的包把自己登记回去（否则装了也不出现在应用中心）；
+    2) 拉包地址统一指向"当前活着的那个端口"（常驻端口优先），容器删了也装得回来；
+    3) 给每个 NAS 用户补桌面快捷方式。
+    """
+    done = []
+    me = os.path.join(STORE, "appinstall.tpk")
+    try:
+        if os.path.isfile(me) and not db_query(
+                "SELECT code FROM appstore_app WHERE code='appinstall'"):
+            register_tpk(me, None)
+            done.append("register:appinstall")
+    except Exception as exc:
+        print("selfheal register failed:", exc)
+
+    port = dl_port()
+    try:
+        rows = db_query("SELECT code, download_url FROM appstore_app"
+                        " WHERE download_url LIKE ?", ("%/files/%%.tpk",))
+        for r in rows:
+            code = r["code"]
+            if not os.path.isfile(os.path.join(STORE, code + ".tpk")):
+                continue
+            want = "http://127.0.0.1:%d/files/%s.tpk" % (port, code)
+            if r["download_url"] != want:
+                db_exec("UPDATE appstore_app SET download_url=?, update_time=CURRENT_TIMESTAMP"
+                        " WHERE code=?", (want, code))
+                done.append("dl_url:" + code)
+            ensure_shortcut(code)
+            done.append("shortcut:" + code)
+    except Exception as exc:
+        print("selfheal sync failed:", exc)
+    return done
+
+
 if __name__ == "__main__":
     AUTH = load_auth()
     try:
         print("icon heal:", heal_icons())
     except Exception as _e:
         print("icon heal failed:", _e)
+    try:
+        print("self heal:", selfheal())
+    except Exception as _e:
+        print("self heal failed:", _e)
     srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print("TPK installer on 0.0.0.0:%d" % PORT)
     srv.serve_forever()

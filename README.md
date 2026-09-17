@@ -67,6 +67,10 @@
 NAS 网页 → Docker → Compose 项目 → 新建，项目名 `appinstall`，
 把 `docker-compose.yml` 的内容粘贴进去。
 
+> 这种方式和应用中心安装 `.tpk` **二选一**：两者用的是同一个容器名 `appinstall-app`
+> 与同一个 `8978` 端口。已经用其中一种跑着，再装另一种会提示容器名冲突 ——
+> v1.1.4 起 tpk 的安装脚本会自动清理这种残留容器，更早的版本请先 `docker compose down`。
+
 ### 2. 上传程序文件
 
 用文件管理器把 `app/` 目录（2 个文件）放到 Compose 项目目录下（即 `docker-compose.yml` 同级）。
@@ -216,7 +220,8 @@ python3 tools/verify.py http://NAS_IP:8978 你的口令
 
 1. 本地源码 `app/tpk_installer.py`
 2. 容器运行版 —— 应用中心装的 appinstall 容器在用的那份
-3. 主机兜底版 —— 容器被卸载时，systemd 服务 `tie-niu-tpk-installer` 会用它接替
+3. 主机兜底版 —— 容器被卸载时，systemd 服务 `tie-niu-tpk-installer` 会用它接替；
+   1.1.5 起它还会常驻一份在 `8799` 端口专门发安装包（见下方「容器被删了怎么装回来」）
 
 第 3 份最容易忘：漏了的话，卸掉容器后闸门和包库管理会一起消失。
 用 `tools/check_sync.sh` 随时比对：
@@ -277,7 +282,66 @@ chrome --headless=new --virtual-time-budget=9000 --dump-dom http://NAS:8978/ > d
 （WebView）能不能选文件，取决于该 App 有没有实现文件选择回调。页面检测到触屏时会显示对应提示；
 此时改用手机自带浏览器（Chrome / Safari / Edge）或电脑打开同一地址即可。
 
+## 容器被删了怎么装回来：常驻包源 8799
+
+**先说问题**。应用中心装一个应用 = 下载它 `download_url` 指向的那个 `.tpk`。
+而 appinstall **自己**那条记录指向 `http://127.0.0.1:8978/files/appinstall.tpk` ——
+这个 8978 正是 appinstall 容器在服务。于是：
+
+- 容器被手动 `docker rm`、被卸载、或上次安装装到一半失败 → 8978 立刻没人应答；
+- 应用中心拉不到包 → **appinstall 再也装不回来**，只能上机器手工救；
+- 顺带一提，容器没了但应用中心的记录还停在 `state=started`，
+  这时点「安装」只会收到一句 `应用已经安装`，看起来更像"装不了"。
+
+**1.1.5 起的做法**：`cmd/install.sh` 在宿主机上常驻**同一个程序**、只换一个端口
+（`8799`），它干的事就是发安装包（顺带也是个救援页面）。容器在不在都不影响它。
+应用启动时还会把所有自装应用的 `download_url` 统一指向"当前活着的那个端口"。
+
+| 端口 | 谁在听 | 用途 |
+|---|---|---|
+| `8978` | appinstall 容器 | 主面板、上传、包库 |
+| `8799` | 宿主机 `tie-niu-tpk-fallback` 服务 | 常驻发包，容器被删也能重装；救援页面 |
+
+**手动删掉容器之后，正确的恢复动作（二选一）**：
+
+1. 打开应用中心 → 点该应用的**「卸载」**（把记录改成 `notInstalled`）→ 再点**「安装」**；
+2. 或者打开 `http://<NAS地址>:8799/` 上传 `appinstall.tpk` ——
+   安装器会自己走"先卸载再安装"，不需要人管顺序。
+
+宿主机那份 systemd 单元是 `tie-niu-tpk-fallback`：
+
+```bash
+systemctl status tie-niu-tpk-fallback      # 应该 enabled + active
+curl -sI http://127.0.0.1:8799/files/appinstall.tpk   # 应该 200
+```
+
+关掉它程序照常运行，但**就失去了"容器删了还能在应用中心装回来"的保障**。
+卸载 appinstall 时它会保留 —— 那正是应用不在时的入口。
+
+## 桌面图标是自动补的
+
+NAS 桌面上的应用图标对应 `appstore_app_shortcut` 里一行
+`(user_id, app_code, operate_type=1)`。官方那条路是**页面**在用户点「添加到桌面」时
+写进去的，而那个接口要登录令牌（回环无令牌会被拒：`Failed to authorize user.
+Err: Token is missing`）—— 所以没登录、没 root 的人装完很可能**永远没有图标**。
+
+本程序在注册包（上传 / 重装）和应用启动时直接落库补齐，用户 id 来自：
+
+1. 安装脚本在宿主机上抄下来的 `/etc/passwd` 里 `uid>=1000` 的账号（存到 `.users`）；
+2. `appstore_app_shortcut` 里已有的 user_id；
+3. 都没有才兜底 `1000`（铁牛/ZeroNAS 首个用户）。
+
+补的时候是 `INSERT OR IGNORE`：**你自己在桌面上删掉的图标不会被顶回来**
+（那种记录会留下 `operate_type=0`）。
+
 ## 常见问题
+
+**装完了应用中心里看不到它 / 桌面上没有图标？** → 应用中心看的是 `appstore_app` 里
+`shelf_state != 0` 的记录，桌面看的是 `appstore_app_shortcut` 里 `operate_type=1` 的行。
+正常走上传安装会两样一起写；哪一样缺了，重启一次应用会自动补齐（见上方「桌面图标是自动补的」）。
+
+**把容器删了，应用中心点安装提示「应用已经安装」？** → 记录还停在 `started`，先点「卸载」再点「安装」。
+包源常驻在 `8799`，这时拉包不会再失败（见上方「容器被删了怎么装回来」）。
 
 **忘记口令 / 进不去页面？** → 见上方「访问口令」。口令是哈希存储、找不回来；删掉
 `/userdata/tpk_local/.auth.json` 重启即可回到「设置访问口令」（这一步需要 root）。
@@ -305,6 +369,17 @@ PC 内网看着正常、手机 App 白图，基本就是这个原因。
 最常见的原因是内嵌 JS 有语法错误（见上方「改页面时必须跑的两个检查」），
 也可能是浏览器缓存了旧页面 —— 先强制刷新（Ctrl/Cmd+Shift+R），
 再跑 `tools/check_page.py --live <你的地址>` 确认线上页面本身是好的。
+
+**安装时提示 `Conflict. The container name "/appinstall-app" is already in use`？** →
+容器名被占着了。两种部署方式（Docker Compose 自建 / 应用中心 tpk）用的是同一个容器名与
+`8978` 端口，只能二选一。删掉占用的那个容器再重试即可：
+
+```bash
+docker ps -a | grep appinstall-app   # 看看现在是谁占着
+docker rm -f appinstall-app          # 属于旧的 Docker 部署就回项目目录 docker compose down
+```
+
+v1.1.4 起 tpk 的安装脚本会自己清理这种残留容器，不再需要手动操作。
 
 **换了存储池路径要改哪里？** → 改 `.env` 里的 `TPK_DEFAULT_LOC`，或在网页的安装位置输入框临时填写。
 
