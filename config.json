@@ -1,0 +1,56 @@
+{
+	"appId": "com.centerm.docker.appinstall",
+	"serviceName": "appinstall",
+	"version": {
+		"lowVersion": "1.0.0",
+		"version": "1.1.3"
+	},
+	"languageList": ["zh-CN", "en-US"],
+	"i18n": [{
+		"name": "本地应用安装",
+		"description": "网页端上传 .tpk 安装包的入口：把本地安装包注册进应用中心并自动安装/升级。支持拖拽上传、本地包库管理（重装 / 下载 / 删除）与环境自检。",
+		"author": "西了个瓜",
+		"langName": "zh-CN",
+		"versionContent": "页面底部新增署名行（© 2026 应用安装 <版本> · Crafted by 西了个瓜），与风扇调速等应用保持一致的展示风格。"
+	}, {
+		"name": "Local App Installer",
+		"description": "Upload local .tpk packages, register them into the app center and install/upgrade automatically. Includes drag-and-drop upload, a local package library (reinstall / download / delete) and an environment self-check.",
+		"author": "西了个瓜",
+		"langName": "en-US",
+		"versionContent": "Adds a signature line at the bottom of the page (© 2026 App Installer <version> · Crafted by 西了个瓜), matching the style used by the other bundled apps."
+	}],
+	"installParameters": {
+		"list": [{
+			"key": "TPK_PASSWORD",
+			"paramType": 2,
+			"maxLength": 0,
+			"miniLength": 0,
+			"isRequired": false,
+			"maxValuesCount": 1,
+			"verifyRegular": "",
+			"i18ns": [{
+				"name": "访问口令（留空则首次打开页面时设置）",
+				"description": "打开安装器页面时需要输入的口令。安装包里的脚本以 root 在 NAS 上执行，所以这个页面不能没有口令。留空则由第一个打开页面的人自行设置（不需要 root 权限）。",
+				"inputNotice": "至少 6 位，留空即可",
+				"langName": "zh-CN"
+			}, {
+				"name": "Access password (set on first page open if empty)",
+				"description": "Password required to open the installer page. Scripts inside installed packages run as root on the NAS, so this page must be protected. Left empty, the first visitor sets it on the page (no root needed).",
+				"inputNotice": "6+ characters, optional",
+				"langName": "en-US"
+			}]
+		}]
+	},
+	"accessCtrl": {
+		"urlAppAccesses": [{
+			"httpsEnable": false,
+			"httpsPort": "",
+			"port": "8978",
+			"urlPath": "/"
+		}],
+		"supports": [
+			"pc",
+			"app"
+		]
+	}
+}
