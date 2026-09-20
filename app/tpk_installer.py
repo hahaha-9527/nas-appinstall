@@ -6,8 +6,13 @@
 - POST /api/uninstall   {code}  调官方卸载
 - GET  /files/<code>.tpk  供应用商店服务下载 (127.0.0.1)
 - GET  /icons/<code>.png  应用图标 (本机备查)
-- 图标可发布到 /usr/local/pc/<code>-icon.png（配置 TPK_PUBLIC_BASE 后启用），
-  手机App / 远程网页必须用公网地址才能读到，否则按局域网地址处理
+- icon_url 默认写**内嵌 data URL**（图标 base64 直接进数据库）。原因：应用中心界面是
+  客户端自带的本地页面（file:// 加载，NAS 只提供 API），前端只有 <img src="{iconUrl}">
+  裸绑定 —— 相对路径按本地 origin 解析必然失败（整排破图），内网 http 绝对地址在中转
+  https 下被混合内容拦，公网域名又是每台机器不同。内嵌 data URL 与 origin/协议/网络
+  全无关，局域网、铁牛中转、手机 App 一律可见。图标另存一份 /usr/local/pc/ 供人工核对。
+  想换绝对地址配 TPK_PUBLIC_BASE（例 https://nas.example.com/pc）；TPK_ICON_MODE=lan
+  退回局域网地址，=off 则不写图标地址。
 端口 8978, 仅依赖标准库。"""
 import base64
 import hashlib
@@ -28,24 +33,45 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # 改动版本时必须与 config.json 的 version 同步（前缀 v 不算），
 # `tie-niu-led/appstore/_build_appinstall.py` 打包时会断言两者一致。
 # 展示用的版本串（含 v 前缀，与风扇调速等同风格）。
-VERSION = "v1.1.5"
+VERSION = "v1.1.6"
 
 # ---------- 可通过环境变量覆盖的部署参数（默认值 = 铁牛 NAS 的路径） ----------
 PORT = int(os.environ.get("TPK_PORT") or 8978)
 STORE = os.environ.get("TPK_STORE") or "/userdata/tpk_local"
 ICONS = os.path.join(STORE, "icons")
-# 对外网页目录：由 NAS 上的 nginx/Apache 把 `<公网地址>/pc/` 映射到该目录。
-# 手机App 与远程网页都走外网通道，局域网/回环地址一律读不到，必须用公网地址。
+# 对外网页目录：NAS 上的 nginx 把 `<访问入口>/pc/` 映射到该目录。
+# 图标副本仍会往这里写一份（方便人工在浏览器里核对），但 DB 里的地址已不走这条路径。
 WEBROOT = os.environ.get("TPK_WEBROOT") or "/usr/local/pc"
-# 公网前缀：手机 App 与远程网页只能读公网地址，局域网地址会显示白图。
-# 默认按铁牛（ZeroNAS）的对外代理填好，开箱即用；换别的机器用环境变量覆盖，
-# 例如 TPK_PUBLIC_BASE=https://nas.example.com/pc；显式设为 off 则关闭公网发布。
-_pb = os.environ.get("TPK_PUBLIC_BASE")
-if _pb is None:
-    _pb = "https://tieniu.tieniu-link.com/pc"
-elif _pb.strip().lower() in ("off", "none", "0", "-"):
-    _pb = ""
-PUBLIC_BASE = _pb.rstrip("/")
+# /pc/ 这个 URL 前缀，仅用于"局域网模式"下的展示与兜底。
+WEB_PATH = (os.environ.get("TPK_WEB_PATH") or "/pc").strip().rstrip("/") or "/pc"
+if not WEB_PATH.startswith("/"):
+    WEB_PATH = "/" + WEB_PATH
+
+# ---------- icon_url 写库策略：默认把图标内嵌进数据库 ----------
+# 图标地址踩过三轮，最后落到 data URL：
+#   ① 绝对公网域名：包内默认值写死了作者那台机器，别人装上指向错误的地方；
+#   ② 内网 http 绝对地址：局域网正常，但铁牛中转是 https 页面，引用 http 内网图
+#      既不可达又被浏览器按混合内容拦掉 —— 表现就是"局域网正常、中转白图"；
+#   ③ 相对路径 /pc/x.png：**整排破图**。因为应用中心界面是客户端自带的本地页面
+#      （file:// 加载，NAS 只提供 API），前端只有 <img src="{iconUrl}"> 裸绑定，
+#      相对路径按本地 origin 解析，`/pc/...` 根本无从谈起。
+# 结论：唯一在"局域网 / 中转 / 手机 App / 各客户端"全场景成立的是把图标本身 base64
+# 内嵌进 DB —— 与 origin、协议、网络全无关。图标几 KB~几十 KB，写 SQLite 毫无压力。
+_im = (os.environ.get("TPK_ICON_MODE") or "").strip().lower()
+_pb = (os.environ.get("TPK_PUBLIC_BASE") or "").strip()
+if _im in ("off", "none", "0", "-") or _pb.lower() in ("off", "none", "0", "-"):
+    ICON_MODE = "off"             # 不写图标地址
+    PUBLIC_BASE = None
+elif _pb:
+    ICON_MODE = "public"          # 绝对地址：<TPK_PUBLIC_BASE>/<code>-icon.png
+    PUBLIC_BASE = _pb.rstrip("/")
+elif _im in ("lan", "local"):
+    ICON_MODE = "lan"             # 退回 http://<内网IP>:8978/icons/<code>.png
+    PUBLIC_BASE = None
+else:
+    ICON_MODE = "inline"          # 默认：data:image/png;base64,...
+    PUBLIC_BASE = None
+ICON_PUBLISH = ICON_MODE != "off"  # 兼容旧引用
 DB = os.environ.get("TPK_DB") or "/userdata/db/appstore.db"
 APPSTORE = (os.environ.get("TPK_APPSTORE_API")
             or "http://127.0.0.1:9004/appstoreApi").rstrip("/")
@@ -285,31 +311,68 @@ def parse_multipart(body, ctype):
     return fields
 
 
+def icon_base():
+    """面板/自检里展示的"图标地址"说明（仅供排查，不参与写库）。"""
+    if ICON_MODE == "public":
+        return PUBLIC_BASE
+    if ICON_MODE == "lan":
+        return "http://<NAS地址>%s" % WEB_PATH
+    if ICON_MODE == "off":
+        return "(未发布)"
+    return "内嵌 data URL（不依赖访问入口/协议）"
+
+
 def publish_icon(code, data=None):
-    """把图标发布到对外网页目录，返回公网 icon_url；不可用时返回 None（调用方退回局域网地址）。"""
-    if not PUBLIC_BASE:
-        return None  # 未配置公网前缀：不发布，继续用局域网图标地址
+    """按当前策略生成写进 DB 的 icon_url。
+    - inline（默认）：`data:image/png;base64,...` —— 图标直接内嵌，任何入口/协议/客户端都可见
+    - public：`<TPK_PUBLIC_BASE>/<code>-icon.png`
+    - lan / off：返回 None（调用方退回局域网地址 / 不写）
+    任何模式下都会把图标另存一份到 WEBROOT，便于人工在浏览器里核对。"""
+    if ICON_MODE == "off":
+        return None
     src = os.path.join(ICONS, code + ".png")
     if data is None:
         if not os.path.isfile(src):
             return None
-        with open(src, "rb") as f:
-            data = f.read()
-    dst = os.path.join(WEBROOT, code + "-icon.png")
+        try:
+            with open(src, "rb") as f:
+                data = f.read()
+        except Exception:
+            return None
+    if not data:
+        return None
     try:
         os.makedirs(WEBROOT, exist_ok=True)
+        dst = os.path.join(WEBROOT, code + "-icon.png")
         with open(dst, "wb") as f:
             f.write(data)
         os.chmod(dst, 0o644)
     except Exception:
+        pass  # 副本写不进去不影响内嵌方案
+    if ICON_MODE == "public":
+        return "%s/%s-icon.png" % (PUBLIC_BASE, code)
+    if ICON_MODE == "lan":
         return None
-    return "%s/%s-icon.png" % (PUBLIC_BASE, code)
+    return "data:image/png;base64," + base64.b64encode(data).decode("ascii")
+
+
+def _icon_url_is_ours(cur):
+    """这个 icon_url 是不是本程序写过的（可以放心覆盖）。
+    覆盖判据必须认 data: —— 否则在"内嵌 / 绝对地址 / 相对路径"之间切换时，
+    自愈会把已改好的地址漏掉。"""
+    if not cur:
+        return True
+    if cur.startswith("data:image/"):
+        return True
+    if "/icons/" in cur or "/pc/" in cur:
+        return True
+    return False
 
 
 def heal_icons():
-    """启动自愈：把 ICONS 下所有图标发布到对外目录，
-    并把 DB 里还是局域网地址的 icon_url/latest_icon_url 换成公网地址。
-    这样早先装的应用不用手工改库。"""
+    """启动自愈：按当前策略重算所有图标的地址，并把 DB 里"对不上"的
+    icon_url/latest_icon_url 纠正过来。旧版写进去的局域网地址、作者机器上的公网域名、
+    相对路径 /pc/ 都能一并改掉 —— 换机器、换访问入口、换策略都不必手工改库。"""
     healed = []
     try:
         names = sorted(n[:-4] for n in os.listdir(ICONS) if n.endswith(".png"))
@@ -325,10 +388,14 @@ def heal_icons():
             continue
         for r in rows:
             cur = r.get("icon_url") or ""
-            if cur.startswith("http") and "/icons/" in cur:
-                db_exec("UPDATE appstore_app SET icon_url=?, latest_icon_url=? WHERE code=?",
-                        (url, url, code))
-                healed.append(code)
+            if cur == url:
+                continue
+            # 只纠正"我们自己写过"的图标地址；应用自带的其它外链图标不动。
+            if not _icon_url_is_ours(cur):
+                continue
+            db_exec("UPDATE appstore_app SET icon_url=?, latest_icon_url=? WHERE code=?",
+                    (url, url, code))
+            healed.append(code)
     return healed
 
 
@@ -482,15 +549,22 @@ def selftest():
     except Exception as exc:
         add("应用中心接口", False, "%s —— %s" % (APPSTORE, exc))
 
-    if not PUBLIC_BASE:
-        add("图标公网发布", False,
-            "未配置 TPK_PUBLIC_BASE：图标只能走局域网地址，手机 App / 远程网页会显示白图")
+    if ICON_MODE == "off":
+        add("图标地址", False, "TPK_ICON_MODE=off：不写图标地址，应用中心会显示默认图")
     else:
         try:
             os.makedirs(WEBROOT, exist_ok=True)
-            add("图标对外目录", os.path.isdir(WEBROOT), "%s  →  %s" % (WEBROOT, PUBLIC_BASE))
+            if ICON_MODE == "inline":
+                desc = ("图标内嵌进数据库（data URL），不依赖访问入口与协议 —— "
+                        "局域网、铁牛中转、手机 App 都能显示；副本另存 %s" % WEBROOT)
+            elif ICON_MODE == "public":
+                desc = "%s → 绝对地址 %s/<应用>-icon.png" % (WEBROOT, PUBLIC_BASE)
+            else:
+                desc = ("局域网模式：只能走 http://<NAS地址>:8978/icons/<应用>.png，"
+                        "铁牛中转(https) / 手机 App 会是白图")
+            add("图标地址", os.path.isdir(WEBROOT), desc)
         except Exception as exc:
-            add("图标对外目录", False, "%s —— %s" % (WEBROOT, exc))
+            add("图标地址", False, "%s —— %s" % (WEBROOT, exc))
 
     try:
         with urllib.request.urlopen("http://127.0.0.1:%d/favicon.ico" % PORT, timeout=5) as r:
@@ -535,7 +609,8 @@ def selftest():
         "items": items,
         "ok": all(i["ok"] for i in items),
         "path": {"STORE": STORE, "DB": DB, "APPSTORE": APPSTORE, "WEBROOT": WEBROOT,
-                 "PUBLIC_BASE": PUBLIC_BASE or "(未配置)", "DEFAULT_LOC": DEFAULT_LOC,
+                 "ICON_BASE": icon_base(), "ICON_MODE": ICON_MODE,
+                 "DEFAULT_LOC": DEFAULT_LOC,
                  "PORT": PORT, "IMAGE_SIZE_KB": IMAGE_SIZE_KB},
     }
 
@@ -635,16 +710,17 @@ def register_tpk(path, host_hdr):
     if icon_data:
         with open(os.path.join(ICONS, code + ".png"), "wb") as f:
             f.write(icon_data)
-    # 同步发布一份到对外网页目录，拿公网图标地址
-    public_icon = publish_icon(code, icon_data) if icon_data else publish_icon(code)
+    # 同步发布一份到对外网页目录（/usr/local/pc/），拿写进 DB 的图标地址
+    icon_pub = publish_icon(code, icon_data) if icon_data else publish_icon(code)
 
     host = (host_hdr or "").strip()
     if not host or host.split(":")[0] in ("127.0.0.1", "localhost", "0.0.0.0"):
         host = "%s:%d" % (_lan_ip(), PORT)  # 浏览器要能访问, 回环地址一律换网卡 IP
     dl_url = "http://127.0.0.1:%d/files/%s.tpk" % (dl_port(), code)
     lan_icon_url = "http://%s/icons/%s.png" % (host, code)
-    # 手机App / 远程网页只有公网地址能加载；发布失败才退回局域网地址
-    icon_url = public_icon or lan_icon_url
+    # 正常是 /pc/<code>-icon.png（相对，跟随访问入口）；
+    # 只有显式关掉发布（TPK_PUBLIC_BASE=off）时才退回局域网地址
+    icon_url = icon_pub or lan_icon_url
     today = time.strftime("%Y-%m-%d")
     size = os.path.getsize(dst_tpk)
 

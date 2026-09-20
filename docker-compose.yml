@@ -17,9 +17,10 @@ services:
       - TPK_APPSTORE_API=${TPK_APPSTORE_API:-http://127.0.0.1:9004/appstoreApi}
       - TPK_DEFAULT_LOC=${TPK_DEFAULT_LOC:-/volume1}
       - TPK_WEBROOT=${TPK_WEBROOT:-/usr/local/pc}
-      # 图标对外前缀：手机 App 与远程网页只认公网地址，用局域网地址会白图。
-      # 想换成自己的地址就改这里；显式填 off 表示关闭公网发布。
-      - TPK_PUBLIC_BASE=${TPK_PUBLIC_BASE:-https://tieniu.tieniu-link.com/pc}
+      # 图标默认以 base64 内嵌进数据库（与访问入口、协议、客户端都无关），一般不用配。
+      # 只有某个客户端不认 data URL 时，才在这里填**这台机器自己**的公网前缀
+      # （形如 https://nas.example.com/pc —— 注意要自带 /pc，不能填成别人的域名）。
+      - TPK_PUBLIC_BASE=${TPK_PUBLIC_BASE:-}
       - TPK_IMAGE_SIZE_KB=${TPK_IMAGE_SIZE_KB:-121437}
       # 访问口令：留空则首次打开页面时由访问者自行设置（不需要 root 权限）
       # 想固定下来就在这里填；填了会覆盖页面上设置的值
@@ -29,7 +30,7 @@ services:
       - ${TPK_DB_DIR:-/userdata/db}:${TPK_DB_DIR:-/userdata/db}
       # 上传的 .tpk、图标缓存与访问口令记录（.auth.json，不含明文）
       - ${TPK_STORE:-/userdata/tpk_local}:${TPK_STORE:-/userdata/tpk_local}
-      # 对外网页目录：图标发布到 <公网域名>/pc/<code>-icon.png，手机 App 才能显示
+      # 图标副本另存一份到这里，方便在浏览器里人工核对（数据库里的地址不依赖它）
       - ${TPK_WEBROOT:-/usr/local/pc}:${TPK_WEBROOT:-/usr/local/pc}
       # 程序本体（只读挂载，改完 up -d 即生效）
       - ./app:/opt/app:ro

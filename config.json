@@ -3,7 +3,7 @@
 	"serviceName": "appinstall",
 	"version": {
 		"lowVersion": "1.0.0",
-		"version": "1.1.5"
+		"version": "1.1.6"
 	},
 	"languageList": ["zh-CN", "en-US"],
 	"i18n": [{
@@ -11,13 +11,13 @@
 		"description": "网页端上传 .tpk 安装包的入口：把本地安装包注册进应用中心并自动安装/升级。支持拖拽上传、本地包库管理（重装 / 下载 / 删除）与环境自检。",
 		"author": "西了个瓜",
 		"langName": "zh-CN",
-		"versionContent": "修复「容器被删后再也装不回来」：应用中心是从 127.0.0.1:8978 拉安装包的，而那份包正是 appinstall 容器自己在发，所以容器一被删（手动 docker rm、卸载、上次安装中途失败），应用中心就再也装不回它。现在安装时会在宿主机上常驻一个只负责发包的实例（端口 8799，容器在不在都活着），启动时把拉包地址指向活着的那一个。同时补上桌面图标：官方只在页面上手动点「添加到桌面」时才写记录，没登录、没 root 的人永远拿不到图标，现在安装与启动会自动补齐（你自己删掉的记录不会被顶回来）。另外把应用中心下载的包自动存进本地包库，重装永远有底包。"
+		"versionContent": "1. 修复图标不显示。\\n2. 修复图标指向错误。\\n3. 新增：启动时自动纠正历史上写坏的图标地址，无需手工改库。"
 	}, {
 		"name": "Local App Installer",
 		"description": "Upload local .tpk packages, register them into the app center and install/upgrade automatically. Includes drag-and-drop upload, a local package library (reinstall / download / delete) and an environment self-check.",
 		"author": "西了个瓜",
 		"langName": "en-US",
-		"versionContent": "Fixes 'once the container is deleted it can never be reinstalled': the app center pulls the package from 127.0.0.1:8978, which is served by the appinstall container itself, so deleting or uninstalling it leaves nobody to answer and it can never be reinstalled. Installation now keeps an always-on package source on the host (port 8799, alive whether or not the container runs) and startup points the download URL at whichever one is alive. Desktop shortcuts are now created automatically as well: officially they are only written when someone clicks 'add to desktop' in the UI, so users without a login or root never get an icon; install and startup now fill them in, without overriding shortcuts you removed yourself. The package downloaded by the app center is also stored into the local package library, so there is always something to reinstall from."
+		"versionContent": "1. Fixed icons not showing.\\n2. Fixed icons pointing to the wrong machine.\\n3. New: previously broken icon URLs are corrected automatically on startup."
 	}],
 	"installParameters": {
 		"list": [{
