@@ -17,9 +17,10 @@ services:
       - TPK_APPSTORE_API=${TPK_APPSTORE_API:-http://127.0.0.1:9004/appstoreApi}
       - TPK_DEFAULT_LOC=${TPK_DEFAULT_LOC:-/volume1}
       - TPK_WEBROOT=${TPK_WEBROOT:-/usr/local/pc}
-      # 图标默认以 base64 内嵌进数据库（与访问入口、协议、客户端都无关），一般不用配。
-      # 只有某个客户端不认 data URL 时，才在这里填**这台机器自己**的公网前缀
-      # （形如 https://nas.example.com/pc —— 注意要自带 /pc，不能填成别人的域名）。
+      # 图标默认以 base64 内嵌进数据库（桌面 / 局域网 / 中转都能显示），一般不用配。
+      # ⚠️ 手机 App 不渲染 data: 图标：想让手机也显示，在这里填**这台机器自己**
+      # 的 HTTPS 前缀（形如 https://nas.example.com/pc，铁牛 NAS 即中转域名），
+      # 重启（up -d --force-recreate）后图标地址自动切换，已装应用无需重装。
       - TPK_PUBLIC_BASE=${TPK_PUBLIC_BASE:-}
       - TPK_IMAGE_SIZE_KB=${TPK_IMAGE_SIZE_KB:-121437}
       # 访问口令：留空则首次打开页面时由访问者自行设置（不需要 root 权限）

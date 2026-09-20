@@ -10,9 +10,11 @@
   客户端自带的本地页面（file:// 加载，NAS 只提供 API），前端只有 <img src="{iconUrl}">
   裸绑定 —— 相对路径按本地 origin 解析必然失败（整排破图），内网 http 绝对地址在中转
   https 下被混合内容拦，公网域名又是每台机器不同。内嵌 data URL 与 origin/协议/网络
-  全无关，局域网、铁牛中转、手机 App 一律可见。图标另存一份 /usr/local/pc/ 供人工核对。
-  想换绝对地址配 TPK_PUBLIC_BASE（例 https://nas.example.com/pc）；TPK_ICON_MODE=lan
-  退回局域网地址，=off 则不写图标地址。
+  全无关，桌面 / 局域网 / 铁牛中转都可见；**但手机 App 不渲染 data: 图标**（2026-09-21
+  实测）。需要手机端也显示时，配 TPK_PUBLIC_BASE 指向本机 HTTPS 入口（例
+  https://nas.example.com/pc），启动自愈会把库里的 data: 地址统一刷成绝对地址。
+  TPK_ICON_MODE=lan 退回局域网地址（同样进不了手机），=off 则不写图标地址。
+  图标另存一份 /usr/local/pc/ 供人工核对。
 端口 8978, 仅依赖标准库。"""
 import base64
 import hashlib
@@ -33,7 +35,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # 改动版本时必须与 config.json 的 version 同步（前缀 v 不算），
 # `tie-niu-led/appstore/_build_appinstall.py` 打包时会断言两者一致。
 # 展示用的版本串（含 v 前缀，与风扇调速等同风格）。
-VERSION = "v1.1.6"
+VERSION = "v1.1.7"
 
 # ---------- 可通过环境变量覆盖的部署参数（默认值 = 铁牛 NAS 的路径） ----------
 PORT = int(os.environ.get("TPK_PORT") or 8978)
@@ -48,15 +50,19 @@ if not WEB_PATH.startswith("/"):
     WEB_PATH = "/" + WEB_PATH
 
 # ---------- icon_url 写库策略：默认把图标内嵌进数据库 ----------
-# 图标地址踩过三轮，最后落到 data URL：
+# 图标地址踩过四轮：
 #   ① 绝对公网域名：包内默认值写死了作者那台机器，别人装上指向错误的地方；
 #   ② 内网 http 绝对地址：局域网正常，但铁牛中转是 https 页面，引用 http 内网图
 #      既不可达又被浏览器按混合内容拦掉 —— 表现就是"局域网正常、中转白图"；
 #   ③ 相对路径 /pc/x.png：**整排破图**。因为应用中心界面是客户端自带的本地页面
 #      （file:// 加载，NAS 只提供 API），前端只有 <img src="{iconUrl}"> 裸绑定，
 #      相对路径按本地 origin 解析，`/pc/...` 根本无从谈起。
-# 结论：唯一在"局域网 / 中转 / 手机 App / 各客户端"全场景成立的是把图标本身 base64
-# 内嵌进 DB —— 与 origin、协议、网络全无关。图标几 KB~几十 KB，写 SQLite 毫无压力。
+#   ④ 内嵌 data URL：与 origin、协议、网络全无关，桌面 / 局域网 / 中转都成立 ——
+#      但**手机 App 不渲染 data: URI**（客户端 WebView 限制），手机端自装应用全白图。
+# 结论：四端（桌面/局域网/中转/手机）全通的只有 **HTTPS 绝对地址** —— TPK_PUBLIC_BASE
+#   配本机 HTTPS 入口（如铁牛中转域名），图标文件落 $TPK_WEBROOT。
+# 默认仍为 inline：没有 HTTPS 入口的机器上它是桌面/中转场景的最优解，代价是手机端白图
+# （平台限制，内网 http 同样进不了手机）。图标几 KB~几十 KB，写 SQLite 毫无压力。
 _im = (os.environ.get("TPK_ICON_MODE") or "").strip().lower()
 _pb = (os.environ.get("TPK_PUBLIC_BASE") or "").strip()
 if _im in ("off", "none", "0", "-") or _pb.lower() in ("off", "none", "0", "-"):
@@ -555,10 +561,12 @@ def selftest():
         try:
             os.makedirs(WEBROOT, exist_ok=True)
             if ICON_MODE == "inline":
-                desc = ("图标内嵌进数据库（data URL），不依赖访问入口与协议 —— "
-                        "局域网、铁牛中转、手机 App 都能显示；副本另存 %s" % WEBROOT)
+                desc = ("图标内嵌进数据库（data URL）—— 桌面/局域网/铁牛中转可见；"
+                        "手机 App 不渲染 data: 图标（白图），需要手机显示请配 "
+                        "TPK_PUBLIC_BASE 为本机 HTTPS 前缀后重启；副本另存 %s" % WEBROOT)
             elif ICON_MODE == "public":
-                desc = "%s → 绝对地址 %s/<应用>-icon.png" % (WEBROOT, PUBLIC_BASE)
+                desc = ("%s → 绝对地址 %s/<应用>-icon.png（HTTPS 入口下桌面/手机全通）"
+                        % (WEBROOT, PUBLIC_BASE))
             else:
                 desc = ("局域网模式：只能走 http://<NAS地址>:8978/icons/<应用>.png，"
                         "铁牛中转(https) / 手机 App 会是白图")
@@ -1387,10 +1395,18 @@ def selfheal():
 
 if __name__ == "__main__":
     AUTH = load_auth()
-    try:
-        print("icon heal:", heal_icons())
-    except Exception as _e:
-        print("icon heal failed:", _e)
+    if PORT == FALLBACK_PORT:
+        # 常驻包源实例（8799）：不做图标自愈。它读不到面板实例的环境变量
+        # （如 TPK_PUBLIC_BASE），若按默认策略自愈，会把面板实例已写好的图标地址
+        # 静默覆盖回默认值 —— 每次重启/开机都翻转一次（实测踩到：public 模式的
+        # 机器上 fallback 一重启，全表图标变回 data:，手机白图复发）。
+        # 图标策略一律以面板实例为准；这里只同步 download_url 与桌面图标。
+        print("icon heal skipped (package-source instance on port %d)" % PORT)
+    else:
+        try:
+            print("icon heal:", heal_icons())
+        except Exception as _e:
+            print("icon heal failed:", _e)
     try:
         print("self heal:", selfheal())
     except Exception as _e:
