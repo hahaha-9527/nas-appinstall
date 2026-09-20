@@ -396,6 +396,16 @@ v1.1.4 起 tpk 的安装脚本会自己清理这种残留容器，不再需要�
 
 **升级安装器本身？** → 替换 `app/` 下的文件，`docker compose up -d` 重建容器即可。
 
+## 相关项目
+
+同系列工具，都在 Centerm Zero 1 Pro（铁牛OS）上实机跑通 —— 纯 Python 标准库、单容器、MIT：
+
+| 项目 | 用途 |
+| --- | --- |
+| [nas-tieniuled](https://github.com/hahaha-9527/nas-tieniuled) | 机箱电源灯 / 硬盘灯的可视化控制台 |
+| [nas-fanctl](https://github.com/hahaha-9527/nas-fanctl) | 风扇温度调速：按 CPU 与硬盘温度自动调节转速 |
+| [nas-cloudmount](https://github.com/hahaha-9527/nas-cloudmount) | 网盘挂载：用 rclone 把 AList 的 WebDAV 桥接成 NAS 上的真实目录 |
+
 ## 版本记录
 
 各版本的新增与修复详见 [CHANGELOG.md](CHANGELOG.md)。
