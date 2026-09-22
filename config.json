@@ -3,7 +3,7 @@
 	"serviceName": "appinstall",
 	"version": {
 		"lowVersion": "1.0.0",
-		"version": "1.1.7"
+		"version": "1.1.8"
 	},
 	"languageList": ["zh-CN", "en-US"],
 	"i18n": [{
@@ -11,16 +11,40 @@
 		"description": "网页端上传 .tpk 安装包的入口：把本地安装包注册进应用中心并自动安装/升级。支持拖拽上传、本地包库管理（重装 / 下载 / 删除）与环境自检。",
 		"author": "西了个瓜",
 		"langName": "zh-CN",
-		"versionContent": "1. 修正图标说明：手机 App 不渲染 data: 图标，桌面/局域网/中转正常。\\n2. 手机端显示正解：TPK_PUBLIC_BASE 配本机 HTTPS 前缀，重启自动切换，已装应用无需重装。"
+		"versionContent": "1. 常驻拉包实例（8799）同样读到正确的图标策略：由面板实例落盘共享，两边同源，用它装出来的应用图标不再退化成内嵌图标（手机上白图）。\n2. 图标策略新增两级兜底：策略文件、从库里现有图标地址反推 —— 换机器或误删配置后不会静默退回内嵌。\n3. 应用中心安装时可填写本机 HTTPS 前缀，手机端图标一步到位；两处配置互通，填一处即可。"
 	}, {
 		"name": "Local App Installer",
 		"description": "Upload local .tpk packages, register them into the app center and install/upgrade automatically. Includes drag-and-drop upload, a local package library (reinstall / download / delete) and an environment self-check.",
 		"author": "西了个瓜",
 		"langName": "en-US",
-		"versionContent": "1. Corrected icon docs: phone clients do not render data: icons; desktop/LAN/relay are fine.\\n2. Phone fix: set TPK_PUBLIC_BASE to the HTTPS prefix of this machine; URLs heal on restart, no reinstall needed."
+		"versionContent": "1. The always-on package-source instance (8799) now resolves the same icon policy as the panel instance, so apps installed through it no longer fall back to inline icons (blank on phones).\n2. Two extra fallbacks for the icon policy: a shared policy file, and inference from the URLs already stored in the app-center database.\n3. The app-center install form now accepts the HTTPS prefix of this machine, so phone icons work right away."
 	}],
 	"installParameters": {
 		"list": [{
+			"key": "TPK_PUBLIC_BASE",
+			"paramType": 2,
+			"maxLength": 0,
+			"miniLength": 0,
+			"isRequired": false,
+			"maxValuesCount": 1,
+			"verifyRegular": "",
+			"i18ns": [
+				{
+					"name": "本机 HTTPS 前缀（手机端图标需要，留空 = 图标内嵌）",
+					"description": "填**这台机器自己**的 HTTPS 访问前缀（形如 https://nas.example.com/pc，铁牛 NAS 即中转域名，注意要带 /pc）。手机 App 不渲染内嵌的 data: 图标；填了之后图标改用绝对地址，桌面/局域网/中转/手机四端全通。留空则内嵌进数据库（桌面/局域网/中转正常，手机白图）。",
+					"inputNotice": "https://你的域名/pc，留空即可",
+					"langName": "zh-CN"
+				},
+				{
+					"name": "HTTPS base URL of this machine (for phone icons; empty = inline)",
+					"description": "The HTTPS prefix of THIS machine (e.g. https://nas.example.com/pc - include the /pc part). Phone clients do not render inline data: icons; with this set, icons use absolute URLs and work on desktop, LAN, relay and phone alike. Left empty, icons are embedded into the database (desktop/LAN/relay only).",
+					"inputNotice": "https://your-host/pc, optional",
+					"langName": "en-US"
+				}
+			]
+		},
+		{
+			"key": "TPK_PASSWORD",
 			"key": "TPK_PASSWORD",
 			"paramType": 2,
 			"maxLength": 0,

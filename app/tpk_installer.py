@@ -35,7 +35,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # 改动版本时必须与 config.json 的 version 同步（前缀 v 不算），
 # `tie-niu-led/appstore/_build_appinstall.py` 打包时会断言两者一致。
 # 展示用的版本串（含 v 前缀，与风扇调速等同风格）。
-VERSION = "v1.1.7"
+VERSION = "v1.1.8"
 
 # ---------- 可通过环境变量覆盖的部署参数（默认值 = 铁牛 NAS 的路径） ----------
 PORT = int(os.environ.get("TPK_PORT") or 8978)
@@ -65,19 +65,105 @@ if not WEB_PATH.startswith("/"):
 # （平台限制，内网 http 同样进不了手机）。图标几 KB~几十 KB，写 SQLite 毫无压力。
 _im = (os.environ.get("TPK_ICON_MODE") or "").strip().lower()
 _pb = (os.environ.get("TPK_PUBLIC_BASE") or "").strip()
-if _im in ("off", "none", "0", "-") or _pb.lower() in ("off", "none", "0", "-"):
-    ICON_MODE = "off"             # 不写图标地址
-    PUBLIC_BASE = None
-elif _pb:
-    ICON_MODE = "public"          # 绝对地址：<TPK_PUBLIC_BASE>/<code>-icon.png
-    PUBLIC_BASE = _pb.rstrip("/")
-elif _im in ("lan", "local"):
-    ICON_MODE = "lan"             # 退回 http://<内网IP>:8978/icons/<code>.png
-    PUBLIC_BASE = None
-else:
-    ICON_MODE = "inline"          # 默认：data:image/png;base64,...
-    PUBLIC_BASE = None
-ICON_PUBLISH = ICON_MODE != "off"  # 兼容旧引用
+
+
+def _parse_icon_env():
+    """解析环境变量里的图标策略 → (mode, base, explicit)。
+
+    explicit=False 表示这台实例的环境变量里**没有任何**图标相关配置。这个区分很关键：
+    常驻包源实例（8799）由安装脚本用 systemd 拉起，拿不到容器实例的 environment，
+    它的"没配"不代表用户想要默认值，必须继续往下找（策略文件 / 库里的现有地址）。
+    """
+    if _im in ("off", "none", "0", "-") or _pb.lower() in ("off", "none", "0", "-"):
+        return ("off", None, True)
+    if _pb:
+        return ("public", _pb.rstrip("/"), True)
+    if _im in ("lan", "local"):
+        return ("lan", None, True)
+    if _im in ("inline", "data", "base64"):
+        return ("inline", None, True)
+    return ("inline", None, False)
+
+
+# 生效策略的落盘位置：面板实例写、常驻实例读，两边同在 $TPK_STORE。
+ICON_POLICY_FILE = os.path.join(STORE, ".icon_policy.json")
+_ICON_POLICY_CACHE = {"key": "?", "value": None}
+# 从库里图标地址反推公共前缀：.../pc/<code>-icon.png
+_ICON_PREFIX_RE = re.compile(r"^(https?://.+/)([a-z0-9_-]+)-icon\.png$")
+
+
+def _read_policy_file():
+    try:
+        with open(ICON_POLICY_FILE, encoding="utf-8") as f:
+            rec = json.load(f)
+        mode = str(rec.get("mode") or "")
+        base = (rec.get("base") or "").strip() or None
+        if mode == "public":
+            return (mode, base) if base else None
+        if mode in ("lan", "inline", "off"):
+            return (mode, None)
+    except Exception:
+        pass
+    return None
+
+
+def _write_policy_file(mode, base, source):
+    """面板实例把当前生效策略落盘，供常驻实例读取（写失败不影响运行）。"""
+    try:
+        rec = {"mode": mode, "base": base, "source": source,
+               "updated": time.strftime("%Y-%m-%d %H:%M:%S")}
+        tmp = ICON_POLICY_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(rec, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, ICON_POLICY_FILE)
+    except Exception:
+        pass
+
+
+def _guess_base_from_db():
+    """从库里已有的图标地址反推 public 前缀（形如 https://host/pc）。
+
+    环境变量与策略文件都丢了时（换机器、误删配置、容器重建）靠它自愈回
+    "这台机器正在用的那套地址"，而不是静默退回内嵌 data URL。
+    只认与应用 code 同名的图标，避免把应用自带的外链图标误当成前缀。
+    """
+    hits = {}
+    try:
+        for r in db_query("SELECT code, icon_url FROM appstore_app"):
+            m = _ICON_PREFIX_RE.match((r.get("icon_url") or "").strip())
+            if m and m.group(2) == (r.get("code") or ""):
+                k = m.group(1).rstrip("/")
+                hits[k] = hits.get(k, 0) + 1
+    except Exception:
+        return None
+    if not hits:
+        return None
+    return sorted(hits.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+
+
+def icon_policy(refresh=False):
+    """当前生效的图标策略 → (mode, base, source)。
+
+    优先级：env（环境变量显式配置）> file（面板实例落盘的策略）
+            > db（从库里现有地址反推）> default（都没有，内嵌 data URL）。
+    """
+    mode, base, explicit = _parse_icon_env()
+    if explicit:
+        return (mode, base, "env")
+    try:
+        key = os.path.getmtime(ICON_POLICY_FILE)
+    except Exception:
+        key = None
+    if not refresh and _ICON_POLICY_CACHE["key"] == key and _ICON_POLICY_CACHE["value"]:
+        return _ICON_POLICY_CACHE["value"]
+    got = _read_policy_file() if key is not None else None
+    if got:
+        val = (got[0], got[1], "file")
+    else:
+        gb = _guess_base_from_db()
+        val = ("public", gb, "db") if gb else ("inline", None, "default")
+    _ICON_POLICY_CACHE.update({"key": key, "value": val})
+    return val
 DB = os.environ.get("TPK_DB") or "/userdata/db/appstore.db"
 APPSTORE = (os.environ.get("TPK_APPSTORE_API")
             or "http://127.0.0.1:9004/appstoreApi").rstrip("/")
@@ -319,11 +405,12 @@ def parse_multipart(body, ctype):
 
 def icon_base():
     """面板/自检里展示的"图标地址"说明（仅供排查，不参与写库）。"""
-    if ICON_MODE == "public":
-        return PUBLIC_BASE
-    if ICON_MODE == "lan":
+    mode, base, _src = icon_policy()
+    if mode == "public":
+        return base
+    if mode == "lan":
         return "http://<NAS地址>%s" % WEB_PATH
-    if ICON_MODE == "off":
+    if mode == "off":
         return "(未发布)"
     return "内嵌 data URL（不依赖访问入口/协议）"
 
@@ -334,7 +421,8 @@ def publish_icon(code, data=None):
     - public：`<TPK_PUBLIC_BASE>/<code>-icon.png`
     - lan / off：返回 None（调用方退回局域网地址 / 不写）
     任何模式下都会把图标另存一份到 WEBROOT，便于人工在浏览器里核对。"""
-    if ICON_MODE == "off":
+    mode, base, _src = icon_policy()
+    if mode == "off":
         return None
     src = os.path.join(ICONS, code + ".png")
     if data is None:
@@ -355,9 +443,9 @@ def publish_icon(code, data=None):
         os.chmod(dst, 0o644)
     except Exception:
         pass  # 副本写不进去不影响内嵌方案
-    if ICON_MODE == "public":
-        return "%s/%s-icon.png" % (PUBLIC_BASE, code)
-    if ICON_MODE == "lan":
+    if mode == "public":
+        return "%s/%s-icon.png" % (base, code)
+    if mode == "lan":
         return None
     return "data:image/png;base64," + base64.b64encode(data).decode("ascii")
 
@@ -555,22 +643,27 @@ def selftest():
     except Exception as exc:
         add("应用中心接口", False, "%s —— %s" % (APPSTORE, exc))
 
-    if ICON_MODE == "off":
+    _mode, _base, _src = icon_policy()
+    _from = {"env": "环境变量",
+             "file": "策略文件 %s" % ICON_POLICY_FILE,
+             "db": "从库里现有图标地址反推",
+             "default": "默认值"}.get(_src, _src)
+    if _mode == "off":
         add("图标地址", False, "TPK_ICON_MODE=off：不写图标地址，应用中心会显示默认图")
     else:
         try:
             os.makedirs(WEBROOT, exist_ok=True)
-            if ICON_MODE == "inline":
+            if _mode == "inline":
                 desc = ("图标内嵌进数据库（data URL）—— 桌面/局域网/铁牛中转可见；"
                         "手机 App 不渲染 data: 图标（白图），需要手机显示请配 "
                         "TPK_PUBLIC_BASE 为本机 HTTPS 前缀后重启；副本另存 %s" % WEBROOT)
-            elif ICON_MODE == "public":
+            elif _mode == "public":
                 desc = ("%s → 绝对地址 %s/<应用>-icon.png（HTTPS 入口下桌面/手机全通）"
-                        % (WEBROOT, PUBLIC_BASE))
+                        % (WEBROOT, _base))
             else:
                 desc = ("局域网模式：只能走 http://<NAS地址>:8978/icons/<应用>.png，"
                         "铁牛中转(https) / 手机 App 会是白图")
-            add("图标地址", os.path.isdir(WEBROOT), desc)
+            add("图标地址", os.path.isdir(WEBROOT), "%s（来源：%s）" % (desc, _from))
         except Exception as exc:
             add("图标地址", False, "%s —— %s" % (WEBROOT, exc))
 
@@ -591,10 +684,14 @@ def selftest():
                                      else "页面设置（记录在 %s）" % AUTH_FILE))
 
     p = dl_port()
-    if p != PORT:
+    if FALLBACK_PORT == PORT:
+        # 本实例就是常驻包源（由 systemd 拉起）：容器被删时由它顶上
+        add("安装包拉取端口", True,
+            "127.0.0.1:%d —— 本实例即常驻包源，容器被删也装得回来" % PORT)
+    elif p != PORT:
         add("安装包拉取端口", True, "127.0.0.1:%d（常驻服务，容器被删也装得回来）" % p)
     else:
-        add("安装包拉取端口", FALLBACK_PORT == PORT,
+        add("安装包拉取端口", False,
             "127.0.0.1:%d —— 未发现常驻拉包服务，容器被删后应用中心会拉不到包" % p)
 
     try:
@@ -617,7 +714,8 @@ def selftest():
         "items": items,
         "ok": all(i["ok"] for i in items),
         "path": {"STORE": STORE, "DB": DB, "APPSTORE": APPSTORE, "WEBROOT": WEBROOT,
-                 "ICON_BASE": icon_base(), "ICON_MODE": ICON_MODE,
+                 "ICON_BASE": icon_base(), "ICON_MODE": icon_policy()[0],
+                 "ICON_SOURCE": icon_policy()[2],
                  "DEFAULT_LOC": DEFAULT_LOC,
                  "PORT": PORT, "IMAGE_SIZE_KB": IMAGE_SIZE_KB},
     }
@@ -1395,14 +1493,23 @@ def selfheal():
 
 if __name__ == "__main__":
     AUTH = load_auth()
+    _mode, _base, _src = icon_policy()
     if PORT == FALLBACK_PORT:
         # 常驻包源实例（8799）：不做图标自愈。它读不到面板实例的环境变量
         # （如 TPK_PUBLIC_BASE），若按默认策略自愈，会把面板实例已写好的图标地址
         # 静默覆盖回默认值 —— 每次重启/开机都翻转一次（实测踩到：public 模式的
         # 机器上 fallback 一重启，全表图标变回 data:，手机白图复发）。
-        # 图标策略一律以面板实例为准；这里只同步 download_url 与桌面图标。
-        print("icon heal skipped (package-source instance on port %d)" % PORT)
+        # 但"写库用的策略"必须跟着面板实例走：常驻实例同样提供上传安装通道，
+        # 策略若退回默认，用它装出来的应用图标在手机上就是白图（v1.1.8 修的就是这条）。
+        print("icon heal skipped (package-source instance on port %d); policy=%s/%s via %s"
+              % (PORT, _mode, _base, _src))
     else:
+        try:
+            _write_policy_file(_mode, _base, _src)
+            print("icon policy: %s base=%s via %s -> %s"
+                  % (_mode, _base, _src, ICON_POLICY_FILE))
+        except Exception as _e:
+            print("icon policy save failed:", _e)
         try:
             print("icon heal:", heal_icons())
         except Exception as _e:
